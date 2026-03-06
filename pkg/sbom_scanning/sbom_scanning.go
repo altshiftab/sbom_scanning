@@ -16,9 +16,9 @@ import (
 	"github.com/aquasecurity/trivy/pkg/types"
 )
 
-func Scan(ctx context.Context, targetName string, data []byte, globalOptions *flag.GlobalOptions) error {
+func Scan(ctx context.Context, targetName string, data []byte, globalOptions *flag.GlobalOptions) (*types.Report, error) {
 	if globalOptions == nil {
-		return motmedelErrors.NewWithTrace(nil_error.New("global options"))
+		return nil, motmedelErrors.NewWithTrace(nil_error.New("global options"))
 	}
 
 	opts := flag.Options{
@@ -55,7 +55,7 @@ func Scan(ctx context.Context, targetName string, data []byte, globalOptions *fl
 		artifact.WithInitializeService(memory_service.New(targetName, data)),
 	)
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact new runner: %w", err))
+		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact new runner: %w", err))
 	}
 	defer func() {
 		if err := runner.Close(ctx); err != nil {
@@ -71,17 +71,13 @@ func Scan(ctx context.Context, targetName string, data []byte, globalOptions *fl
 
 	report, err := runner.ScanSBOM(ctx, opts)
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact runner scan sbom: %w", err))
+		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact runner scan sbom: %w", err))
 	}
 
 	report, err = runner.Filter(ctx, opts, report)
 	if err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact runner filter: %w", err))
+		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact runner filter: %w", err))
 	}
 
-	if err := runner.Report(ctx, opts, report); err != nil {
-		return motmedelErrors.NewWithTrace(fmt.Errorf("trivy artifact runner report: %w", err))
-	}
-
-	return nil
+	return &report, nil
 }

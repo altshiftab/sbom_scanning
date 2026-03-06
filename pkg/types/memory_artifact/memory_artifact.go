@@ -8,16 +8,14 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/Motmedel/utils_go/pkg/errors"
-	errors2 "github.com/altshiftab/sbom_scanning/pkg/errors"
+	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	sbomScanningErrors "github.com/altshiftab/sbom_scanning/pkg/errors"
 	"github.com/aquasecurity/trivy/pkg/cache"
 	"github.com/aquasecurity/trivy/pkg/fanal/analyzer"
 	"github.com/aquasecurity/trivy/pkg/fanal/artifact"
 	"github.com/aquasecurity/trivy/pkg/fanal/handler"
 	"github.com/aquasecurity/trivy/pkg/fanal/types"
 	"github.com/aquasecurity/trivy/pkg/sbom"
-	"github.com/opencontainers/go-digest"
-	"github.com/samber/lo"
 )
 
 // Artifact implements fartifact.Artifact for in-memory SBOM data.
@@ -36,37 +34,42 @@ func (a *Artifact) Inspect(ctx context.Context) (artifact.Reference, error) {
 
 	format, err := sbom.DetectFormat(r)
 	if err != nil {
-		return artifact.Reference{}, errors.NewWithTrace(fmt.Errorf("trivy sbom detect format: %w", err))
+		return artifact.Reference{}, motmedelErrors.NewWithTrace(fmt.Errorf("trivy sbom detect format: %w", err))
 	}
 
 	if format == sbom.FormatUnknown {
-		return artifact.Reference{}, errors.NewWithTrace(errors2.ErrUnknownSbomFormat)
+		return artifact.Reference{}, motmedelErrors.NewWithTrace(sbomScanningErrors.ErrUnknownSbomFormat)
 	}
 
 	// Rewind after format detection
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return artifact.Reference{}, errors.NewWithTrace(fmt.Errorf("reader seek: %w", err))
+		return artifact.Reference{}, motmedelErrors.NewWithTrace(fmt.Errorf("reader seek: %w", err))
 	}
 
 	bom, err := sbom.Decode(ctx, r, format)
 	if err != nil {
-		return artifact.Reference{}, errors.NewWithTrace(fmt.Errorf("trivy sbom decode: %w", err), format)
+		return artifact.Reference{}, motmedelErrors.NewWithTrace(fmt.Errorf("trivy sbom decode: %w", err), format)
+	}
+
+	var osInfo types.OS
+	if bom.Metadata.OS != nil {
+		osInfo = *bom.Metadata.OS
 	}
 
 	blobInfo := types.BlobInfo{
 		SchemaVersion: types.BlobJSONSchemaVersion,
-		OS:            lo.FromPtr(bom.Metadata.OS),
+		OS:            osInfo,
 		PackageInfos:  bom.Packages,
 		Applications:  bom.Applications,
 	}
 
 	cacheKey, err := a.calcCacheKey(blobInfo)
 	if err != nil {
-		return artifact.Reference{}, errors.New(fmt.Errorf("calc Cache key: %w", err), blobInfo)
+		return artifact.Reference{}, motmedelErrors.New(fmt.Errorf("calc cache key: %w", err), blobInfo)
 	}
 
 	if err = a.Cache.PutBlob(ctx, cacheKey, blobInfo); err != nil {
-		return artifact.Reference{}, errors.New(fmt.Errorf("put blob: %w", err), cacheKey, blobInfo)
+		return artifact.Reference{}, motmedelErrors.New(fmt.Errorf("put blob: %w", err), cacheKey, blobInfo)
 	}
 
 	var artifactType types.ArtifactType
@@ -101,13 +104,12 @@ func (a *Artifact) Clean(ref artifact.Reference) error {
 func (a *Artifact) calcCacheKey(blobInfo types.BlobInfo) (string, error) {
 	h := sha256.New()
 	if err := json.MarshalWrite(h, blobInfo); err != nil {
-		return "", errors.NewWithTrace(fmt.Errorf("json marshal write: %w", err))
+		return "", motmedelErrors.NewWithTrace(fmt.Errorf("json marshal write: %w", err))
 	}
 
-	d := digest.NewDigest(digest.SHA256, h)
-	cacheKey, err := cache.CalcKey(d.String(), 0, a.analyzer.AnalyzerVersions(), a.handlerManager.Versions(), a.Option)
+	cacheKey, err := cache.CalcKey(fmt.Sprintf("sha256:%x", h.Sum(nil)), 0, a.analyzer.AnalyzerVersions(), a.handlerManager.Versions(), a.Option)
 	if err != nil {
-		return "", errors.NewWithTrace(fmt.Errorf("trivy Cache calc key: %w", err))
+		return "", motmedelErrors.NewWithTrace(fmt.Errorf("trivy Cache calc key: %w", err))
 	}
 
 	return cacheKey, nil
