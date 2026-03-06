@@ -1,0 +1,11 @@
+*
+!/.gitignore
+!/go.mod
+!/go.sum
+
+!/cmd
+!/pkg
+
+!/cmd/sbom_scanning
+!/pkg/**/
+!/pkg/**/*.go
