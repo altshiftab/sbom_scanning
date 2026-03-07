@@ -13,7 +13,7 @@ import (
 	"github.com/Motmedel/utils_go/pkg/schema"
 	sbomScanningErrors "github.com/altshiftab/sbom_scanning/pkg/errors"
 	sbomPackage "github.com/altshiftab/sbom_scanning/pkg/types/package"
-	vulnerability2 "github.com/altshiftab/sbom_scanning/pkg/types/vulnerability"
+	sbomScanningVulnerability "github.com/altshiftab/sbom_scanning/pkg/types/vulnerability"
 	"github.com/aquasecurity/trivy-db/pkg/db"
 	"github.com/aquasecurity/trivy-db/pkg/ecosystem"
 	dbTypes "github.com/aquasecurity/trivy-db/pkg/types"
@@ -395,7 +395,7 @@ func (s *Scanner) Close() error {
 	return db.Close()
 }
 
-func (s *Scanner) Scan(data []byte) ([]*vulnerability2.DetectedVulnerability, error) {
+func (s *Scanner) Scan(data []byte) ([]*sbomScanningVulnerability.Vulnerability, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -405,7 +405,7 @@ func (s *Scanner) Scan(data []byte) ([]*vulnerability2.DetectedVulnerability, er
 		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("parse sbom: %w", err))
 	}
 
-	var vulnerabilities []*vulnerability2.DetectedVulnerability
+	var vulnerabilities []*sbomScanningVulnerability.Vulnerability
 	for _, p := range packages {
 		detected, err := s.detectVulnerabilities(p)
 		if err != nil {
@@ -419,7 +419,7 @@ func (s *Scanner) Scan(data []byte) ([]*vulnerability2.DetectedVulnerability, er
 	return vulnerabilities, nil
 }
 
-func (s *Scanner) detectVulnerabilities(p *sbomPackage.Package) ([]*vulnerability2.DetectedVulnerability, error) {
+func (s *Scanner) detectVulnerabilities(p *sbomPackage.Package) ([]*sbomScanningVulnerability.Vulnerability, error) {
 	if p.Purl == nil {
 		return nil, nil
 	}
@@ -437,7 +437,7 @@ func (s *Scanner) detectVulnerabilities(p *sbomPackage.Package) ([]*vulnerabilit
 	return nil, nil
 }
 
-func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, match matchVersionFunc) ([]*vulnerability2.DetectedVulnerability, error) {
+func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, match matchVersionFunc) ([]*sbomScanningVulnerability.Vulnerability, error) {
 	prefix := fmt.Sprintf("%s::", eco)
 	pkgName := vulnerability.NormalizePkgName(eco, p.Name)
 
@@ -446,12 +446,12 @@ func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, ma
 		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("get advisories for %s: %w", pkgName, err))
 	}
 
-	var vulnerabilities []*vulnerability2.DetectedVulnerability
+	var vulnerabilities []*sbomScanningVulnerability.Vulnerability
 	for _, adv := range advisories {
 		if !isVulnerable(p.Version, adv, match) {
 			continue
 		}
-		vulnerabilities = append(vulnerabilities, &vulnerability2.DetectedVulnerability{
+		vulnerabilities = append(vulnerabilities, &sbomScanningVulnerability.Vulnerability{
 			Vulnerability: &schema.Vulnerability{
 				Id: adv.VulnerabilityID,
 			},
@@ -466,7 +466,7 @@ func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, ma
 	return vulnerabilities, nil
 }
 
-func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessThan func(string, string) (bool, error)) ([]*vulnerability2.DetectedVulnerability, error) {
+func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessThan func(string, string) (bool, error)) ([]*sbomScanningVulnerability.Vulnerability, error) {
 	packageName := p.Name
 	// For RPM packages, use the PURL name (without namespace prefix)
 	if p.Purl.Type == "rpm" {
@@ -483,14 +483,14 @@ func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessT
 		installedVersion = formatRPMVersion(p.Purl)
 	}
 
-	var vulnerabilities []*vulnerability2.DetectedVulnerability
+	var vulnerabilities []*sbomScanningVulnerability.Vulnerability
 	for _, advisory := range advisories {
 		if !isOSVulnerable(installedVersion, advisory.FixedVersion, lessThan) {
 			continue
 		}
 		vulnerabilities = append(
 			vulnerabilities,
-			&vulnerability2.DetectedVulnerability{
+			&sbomScanningVulnerability.Vulnerability{
 				Vulnerability: &schema.Vulnerability{
 					Id: advisory.VulnerabilityID,
 				},
@@ -508,7 +508,7 @@ func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessT
 }
 
 // fillInfo enriches detected vulnerabilities with details from the DB.
-func (s *Scanner) fillInfo(vulns []*vulnerability2.DetectedVulnerability) {
+func (s *Scanner) fillInfo(vulns []*sbomScanningVulnerability.Vulnerability) {
 	for _, v := range vulns {
 		if v.FixedVersion != "" {
 			v.Status = dbTypes.StatusFixed
