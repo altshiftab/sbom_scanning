@@ -12,8 +12,8 @@ import (
 	"github.com/Motmedel/utils_go/pkg/errors/types/empty_error"
 	"github.com/Motmedel/utils_go/pkg/schema"
 	sbomScanningErrors "github.com/altshiftab/sbom_scanning/pkg/errors"
+	sbomScanningFinding "github.com/altshiftab/sbom_scanning/pkg/types/finding"
 	sbomPackage "github.com/altshiftab/sbom_scanning/pkg/types/package"
-	sbomScanningVulnerability "github.com/altshiftab/sbom_scanning/pkg/types/vulnerability"
 	"github.com/aquasecurity/trivy-db/pkg/db"
 	"github.com/aquasecurity/trivy-db/pkg/ecosystem"
 	dbTypes "github.com/aquasecurity/trivy-db/pkg/types"
@@ -332,6 +332,26 @@ func autoDetectSeverity(vulnID string, vuln *dbTypes.Vulnerability, dataSourceID
 	return dbTypes.SeverityUnknown.String(), ""
 }
 
+func detectEnumeration(vulnID string) string {
+	if idx := strings.IndexByte(vulnID, '-'); idx != -1 {
+		return vulnID[:idx]
+	}
+	return ""
+}
+
+func autoDetectCVSS(vuln *dbTypes.Vulnerability, severitySource, dataSourceID dbTypes.SourceID) (dbTypes.CVSS, bool) {
+	if cvss, ok := vuln.CVSS[severitySource]; ok {
+		return cvss, true
+	}
+	if cvss, ok := vuln.CVSS[dataSourceID]; ok {
+		return cvss, true
+	}
+	if cvss, ok := vuln.CVSS[vulnerability.NVD]; ok {
+		return cvss, true
+	}
+	return dbTypes.CVSS{}, false
+}
+
 func getPrimaryURL(vulnID string, refs []string, source dbTypes.SourceID) string {
 	switch {
 	case strings.HasPrefix(vulnID, "CVE-"):
@@ -395,7 +415,7 @@ func (s *Scanner) Close() error {
 	return db.Close()
 }
 
-func (s *Scanner) Scan(data []byte) ([]*sbomScanningVulnerability.Vulnerability, error) {
+func (s *Scanner) Scan(data []byte) ([]*sbomScanningFinding.Finding, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
@@ -405,21 +425,21 @@ func (s *Scanner) Scan(data []byte) ([]*sbomScanningVulnerability.Vulnerability,
 		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("parse sbom: %w", err))
 	}
 
-	var vulnerabilities []*sbomScanningVulnerability.Vulnerability
+	var findings []*sbomScanningFinding.Finding
 	for _, p := range packages {
 		detected, err := s.detectVulnerabilities(p)
 		if err != nil {
 			return nil, motmedelErrors.NewWithTrace(fmt.Errorf("detect vulns for %s: %w", p.Name, err))
 		}
-		vulnerabilities = append(vulnerabilities, detected...)
+		findings = append(findings, detected...)
 	}
 
-	s.fillInfo(vulnerabilities)
+	s.fillInfo(findings)
 
-	return vulnerabilities, nil
+	return findings, nil
 }
 
-func (s *Scanner) detectVulnerabilities(p *sbomPackage.Package) ([]*sbomScanningVulnerability.Vulnerability, error) {
+func (s *Scanner) detectVulnerabilities(p *sbomPackage.Package) ([]*sbomScanningFinding.Finding, error) {
 	if p.Purl == nil {
 		return nil, nil
 	}
@@ -437,7 +457,7 @@ func (s *Scanner) detectVulnerabilities(p *sbomPackage.Package) ([]*sbomScanning
 	return nil, nil
 }
 
-func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, match matchVersionFunc) ([]*sbomScanningVulnerability.Vulnerability, error) {
+func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, match matchVersionFunc) ([]*sbomScanningFinding.Finding, error) {
 	prefix := fmt.Sprintf("%s::", eco)
 	pkgName := vulnerability.NormalizePkgName(eco, p.Name)
 
@@ -446,12 +466,12 @@ func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, ma
 		return nil, motmedelErrors.NewWithTrace(fmt.Errorf("get advisories for %s: %w", pkgName, err))
 	}
 
-	var vulnerabilities []*sbomScanningVulnerability.Vulnerability
+	var findings []*sbomScanningFinding.Finding
 	for _, adv := range advisories {
 		if !isVulnerable(p.Version, adv, match) {
 			continue
 		}
-		vulnerabilities = append(vulnerabilities, &sbomScanningVulnerability.Vulnerability{
+		findings = append(findings, &sbomScanningFinding.Finding{
 			Vulnerability: &schema.Vulnerability{
 				Id: adv.VulnerabilityID,
 			},
@@ -463,10 +483,10 @@ func (s *Scanner) detectLangVulns(p *sbomPackage.Package, eco ecosystem.Type, ma
 			DataSource:   adv.DataSource,
 		})
 	}
-	return vulnerabilities, nil
+	return findings, nil
 }
 
-func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessThan func(string, string) (bool, error)) ([]*sbomScanningVulnerability.Vulnerability, error) {
+func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessThan func(string, string) (bool, error)) ([]*sbomScanningFinding.Finding, error) {
 	packageName := p.Name
 	// For RPM packages, use the PURL name (without namespace prefix)
 	if p.Purl.Type == "rpm" {
@@ -483,14 +503,14 @@ func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessT
 		installedVersion = formatRPMVersion(p.Purl)
 	}
 
-	var vulnerabilities []*sbomScanningVulnerability.Vulnerability
+	var findings []*sbomScanningFinding.Finding
 	for _, advisory := range advisories {
 		if !isOSVulnerable(installedVersion, advisory.FixedVersion, lessThan) {
 			continue
 		}
-		vulnerabilities = append(
-			vulnerabilities,
-			&sbomScanningVulnerability.Vulnerability{
+		findings = append(
+			findings,
+			&sbomScanningFinding.Finding{
 				Vulnerability: &schema.Vulnerability{
 					Id: advisory.VulnerabilityID,
 				},
@@ -504,33 +524,60 @@ func (s *Scanner) detectOSVulns(p *sbomPackage.Package, bucketName string, lessT
 			},
 		)
 	}
-	return vulnerabilities, nil
+	return findings, nil
 }
 
-// fillInfo enriches detected vulnerabilities with details from the DB.
-func (s *Scanner) fillInfo(vulns []*sbomScanningVulnerability.Vulnerability) {
-	for _, v := range vulns {
-		if v.FixedVersion != "" {
-			v.Status = dbTypes.StatusFixed
-		} else if v.Status == dbTypes.StatusUnknown {
-			v.Status = dbTypes.StatusAffected
+// fillInfo enriches detected findings with details from the DB.
+func (s *Scanner) fillInfo(findings []*sbomScanningFinding.Finding) {
+	for _, f := range findings {
+		if f.FixedVersion != "" {
+			f.Status = dbTypes.StatusFixed
+		} else if f.Status == dbTypes.StatusUnknown {
+			f.Status = dbTypes.StatusAffected
 		}
 
-		vuln, err := s.dbc.GetVulnerability(v.Vulnerability.Id)
+		vuln, err := s.dbc.GetVulnerability(f.Vulnerability.Id)
 		if err != nil {
 			continue
 		}
 
 		dataSourceID := dbTypes.SourceID("")
-		if v.DataSource != nil {
-			dataSourceID = cmp.Or(v.DataSource.BaseID, v.DataSource.ID)
+		if f.DataSource != nil {
+			dataSourceID = cmp.Or(f.DataSource.BaseID, f.DataSource.ID)
 		}
 
-		severity, severitySource := autoDetectSeverity(v.Vulnerability.Id, &vuln, dataSourceID)
+		severity, severitySource := autoDetectSeverity(f.Vulnerability.Id, &vuln, dataSourceID)
 
-		v.Vulnerability.Severity = severity
-		v.SeveritySource = severitySource
-		v.Vulnerability.Reference = getPrimaryURL(v.Vulnerability.Id, vuln.References, dataSourceID)
+		f.Vulnerability.Severity = severity
+		f.SeveritySource = severitySource
+		f.Vulnerability.Reference = getPrimaryURL(f.Vulnerability.Id, vuln.References, dataSourceID)
+		f.Vulnerability.Description = vuln.Description
+		f.Vulnerability.Enumeration = detectEnumeration(f.Vulnerability.Id)
+
+		if f.DataSource != nil && f.DataSource.Name != "" {
+			f.Vulnerability.Scanner = &schema.VulnerabilityScanner{Vendor: f.DataSource.Name}
+		}
+
+		f.Title = vuln.Title
+		f.CweIDs = vuln.CweIDs
+		f.References = vuln.References
+		f.PublishedDate = vuln.PublishedDate
+		f.LastModifiedDate = vuln.LastModifiedDate
+
+		if cvss, ok := autoDetectCVSS(&vuln, severitySource, dataSourceID); ok {
+			score := &schema.VulnerabilityScore{Base: cvss.V3Score}
+			version := "3.1"
+			if cvss.V40Score != 0 {
+				score.Base = cvss.V40Score
+				version = "4.0"
+			} else if cvss.V3Score == 0 && cvss.V2Score != 0 {
+				score.Base = cvss.V2Score
+				version = "2.0"
+			}
+			score.Version = version
+			f.Vulnerability.Score = score
+			f.Vulnerability.Classification = "CVSS"
+		}
 	}
 }
 
