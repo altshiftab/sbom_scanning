@@ -351,3 +351,67 @@ func TestFormatVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestParseScopeImageAndPaths(t *testing.T) {
+	t.Parallel()
+
+	data := `{
+		"bomFormat": "CycloneDX", "specVersion": "1.6",
+		"metadata": {
+			"component": {"type": "container", "name": "localhost/app", "version": "latest", "purl": "pkg:docker/localhost/app@latest",
+				"properties": [{"name": "altshift:sbom:image", "value": "localhost/app:latest"}]}
+		},
+		"components": [
+			{"type": "library", "name": "golang.org/x/text", "version": "v0.37.0", "scope": "required", "purl": "pkg:golang/golang.org/x/text@v0.37.0",
+				"properties": [{"name": "altshift:sbom:image", "value": "localhost/app:latest"}, {"name": "altshift:sbom:path", "value": "/app"}, {"name": "altshift:sbom:path", "value": "/other"}, {"name": "altshift:sbom:layer", "value": "sha256:top"}]},
+			{"type": "library", "name": "no-props", "version": "1.0.0", "purl": "pkg:npm/no-props@1.0.0"},
+			{"type": "container", "name": "golang", "version": "1.26-alpine", "scope": "excluded", "purl": "pkg:docker/golang@1.26-alpine",
+				"properties": [{"name": "altshift:sbom:image", "value": "docker.io/library/golang:1.26-alpine"}],
+				"components": [
+					{"type": "operating-system", "name": "alpine", "version": "3.24.1", "scope": "excluded"},
+					{"type": "library", "name": "musl", "version": "1.2.6-r2", "scope": "excluded", "purl": "pkg:apk/alpine/musl@1.2.6-r2?arch=x86_64&distro=alpine-3.24.1",
+						"properties": [{"name": "altshift:sbom:path", "value": "/lib/apk/db/installed"}]},
+					{"type": "library", "name": "inherits-image", "version": "1", "scope": "excluded", "purl": "pkg:npm/inherits-image@1"}
+				]},
+			{"type": "container", "name": "alpine", "version": "3.24", "purl": "pkg:docker/alpine@3.24", "components": [
+				{"type": "library", "name": "named-by-container", "version": "1", "purl": "pkg:npm/named-by-container@1"}
+			]}
+		]
+	}`
+
+	packages, err := Parse([]byte(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	type expectation struct {
+		scope  string
+		image  string
+		paths  []string
+		layers []string
+	}
+	expected := map[string]expectation{
+		"golang.org/x/text":  {scope: "required", image: "localhost/app:latest", paths: []string{"/app", "/other"}, layers: []string{"sha256:top"}},
+		"no-props":           {scope: "", image: "localhost/app:latest"},
+		"musl":               {scope: "excluded", image: "docker.io/library/golang:1.26-alpine", paths: []string{"/lib/apk/db/installed"}},
+		"inherits-image":     {scope: "excluded", image: "docker.io/library/golang:1.26-alpine"},
+		"named-by-container": {scope: "", image: "alpine:3.24"},
+	}
+	// The container components have pkg:docker purls, which are parsed as packages too (and ignored by the scanner).
+	got := make(map[string]expectation)
+	for _, p := range packages {
+		if p.Purl.Type == "docker" {
+			continue
+		}
+		got[p.Name] = expectation{scope: p.Scope, image: p.Image, paths: p.Paths, layers: p.Layers}
+	}
+	if len(got) != len(expected) {
+		t.Fatalf("expected %d packages, got %d: %v", len(expected), len(got), got)
+	}
+	for name, e := range expected {
+		g := got[name]
+		if g.scope != e.scope || g.image != e.image || !slices.Equal(g.paths, e.paths) || !slices.Equal(g.layers, e.layers) {
+			t.Errorf("%s: expected %+v, got %+v", name, e, g)
+		}
+	}
+}

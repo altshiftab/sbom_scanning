@@ -525,12 +525,11 @@ func isOsVulnerable(installed, fixed string, lessThan func(installed, fixed stri
 func newOsFinding(p *sbomPackage.Package, advisory dbTypes.Advisory) *sbomScanningFinding.Finding {
 	return &sbomScanningFinding.Finding{
 		Vulnerability: &schema.Vulnerability{Id: advisory.VulnerabilityID},
-		Package: &schema.Package{
-			Name:    p.Name,
-			Version: p.Version,
-		},
-		FixedVersion: advisory.FixedVersion,
-		Status:       advisory.Status,
-		DataSource:   advisory.DataSource,
+		Package:       packageSchema(p),
+		Container:     containerSchema(p),
+		Layer:         firstLayer(p),
+		FixedVersion:  advisory.FixedVersion,
+		Status:        advisory.Status,
+		DataSource:    advisory.DataSource,
 	}
 }

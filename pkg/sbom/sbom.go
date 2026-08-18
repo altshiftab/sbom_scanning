@@ -14,6 +14,7 @@ import (
 	sbomPackage "github.com/altshiftab/sbom_scanning/pkg/types/package"
 	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
 	"github.com/altshiftab/utils_go/pkg/errors/types/empty_error"
+	altshiftSbomTypes "github.com/altshiftab/utils_go/pkg/sbom/types"
 	"github.com/package-url/packageurl-go"
 )
 
@@ -42,9 +43,11 @@ type cycloneDxProperty struct {
 }
 
 type cycloneDxComponent struct {
+	Type       string                `json:"type" xml:"type,attr"`
 	Group      string                `json:"group" xml:"group"`
 	Name       string                `json:"name" xml:"name"`
 	Version    string                `json:"version" xml:"version"`
+	Scope      string                `json:"scope" xml:"scope"`
 	Purl       string                `json:"purl" xml:"purl"`
 	Properties []*cycloneDxProperty  `json:"properties" xml:"properties>property"`
 	Components []*cycloneDxComponent `json:"components" xml:"components>component"`
@@ -136,29 +139,57 @@ func parseCycloneDxXml(data []byte) ([]*sbomPackage.Package, error) {
 func cycloneDxPackages(bom *cycloneDxBom) []*sbomPackage.Package {
 	var packages []*sbomPackage.Package
 
-	var walk func(components []*cycloneDxComponent)
-	walk = func(components []*cycloneDxComponent) {
+	// The image the SBOM describes; packages that do not name their own image belong to it.
+	var subjectImage string
+	if bom.Metadata != nil && bom.Metadata.Component != nil {
+		subjectImage = componentImage(bom.Metadata.Component)
+	}
+
+	var walk func(components []*cycloneDxComponent, image string)
+	walk = func(components []*cycloneDxComponent, image string) {
 		for _, component := range components {
 			if component == nil {
 				continue
 			}
-			if p := cycloneDxPackage(component); p != nil {
+			if p := cycloneDxPackage(component, image); p != nil {
 				packages = append(packages, p)
 			}
-			// Components may nest their own components (e.g. the modules of an application).
-			walk(component.Components)
+			// Components may nest their own components: the packages inside a container image, the modules of an
+			// application. Those inside a container belong to that container's image.
+			nestedImage := image
+			if component.Type == "container" {
+				nestedImage = cmp.Or(componentImage(component), nestedImage)
+			}
+			walk(component.Components, nestedImage)
 		}
 	}
 
 	if bom.Metadata != nil && bom.Metadata.Component != nil {
-		walk([]*cycloneDxComponent{bom.Metadata.Component})
+		walk([]*cycloneDxComponent{bom.Metadata.Component}, subjectImage)
 	}
-	walk(bom.Components)
+	walk(bom.Components, subjectImage)
 
 	return packages
 }
 
-func cycloneDxPackage(component *cycloneDxComponent) *sbomPackage.Package {
+// componentImage names the image a container component stands for: the image property the sbom generator writes,
+// else the component's own name and version.
+func componentImage(component *cycloneDxComponent) string {
+	for _, property := range component.Properties {
+		if property != nil && property.Name == altshiftSbomTypes.PropertyImage && property.Value != "" {
+			return property.Value
+		}
+	}
+	if component.Name == "" {
+		return ""
+	}
+	if component.Version != "" {
+		return component.Name + ":" + component.Version
+	}
+	return component.Name
+}
+
+func cycloneDxPackage(component *cycloneDxComponent, image string) *sbomPackage.Package {
 	purl, ok := parsePurl(component.Purl)
 	if !ok {
 		return nil
@@ -167,6 +198,22 @@ func cycloneDxPackage(component *cycloneDxComponent) *sbomPackage.Package {
 	p := newPackage(component.Name, component.Group, component.Version, purl)
 	if p == nil {
 		return nil
+	}
+
+	p.Scope = component.Scope
+	p.Image = image
+	for _, property := range component.Properties {
+		if property == nil {
+			continue
+		}
+		switch property.Name {
+		case altshiftSbomTypes.PropertyImage:
+			p.Image = property.Value
+		case altshiftSbomTypes.PropertyPath:
+			p.Paths = append(p.Paths, property.Value)
+		case altshiftSbomTypes.PropertyLayer:
+			p.Layers = append(p.Layers, property.Value)
+		}
 	}
 
 	if isOsPurl(purl) {

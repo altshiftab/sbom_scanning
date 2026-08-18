@@ -9,6 +9,7 @@ import (
 	"github.com/altshiftab/sbom_scanning/pkg/sbom"
 	sbomScanningFinding "github.com/altshiftab/sbom_scanning/pkg/types/finding"
 	sbomPackage "github.com/altshiftab/sbom_scanning/pkg/types/package"
+	"github.com/altshiftab/utils_go/pkg/container/types/image_reference"
 	altshiftErrors "github.com/altshiftab/utils_go/pkg/errors"
 	"github.com/altshiftab/utils_go/pkg/schema"
 	"github.com/aquasecurity/trivy-db/pkg/db"
@@ -267,15 +268,48 @@ func (s *Scanner) detectLangVulnerabilities(p *sbomPackage.Package, eco ecosyste
 		}
 		findings = append(findings, &sbomScanningFinding.Finding{
 			Vulnerability: &schema.Vulnerability{Id: advisory.VulnerabilityID},
-			Package: &schema.Package{
-				Name:    p.Name,
-				Version: p.Version,
-			},
-			FixedVersion: createFixedVersions(advisory),
-			DataSource:   advisory.DataSource,
+			Package:       packageSchema(p),
+			Container:     containerSchema(p),
+			Layer:         firstLayer(p),
+			FixedVersion:  createFixedVersions(advisory),
+			DataSource:    advisory.DataSource,
 		})
 	}
 	return findings, nil
+}
+
+// packageSchema describes the package the way findings report it: name and version, plus the SBOM's scope and the
+// first path it was found at, when known.
+func packageSchema(p *sbomPackage.Package) *schema.Package {
+	pkg := &schema.Package{
+		Name:         p.Name,
+		Version:      p.Version,
+		InstallScope: p.Scope,
+	}
+	if len(p.Paths) != 0 {
+		pkg.Path = p.Paths[0]
+	}
+	return pkg
+}
+
+// firstLayer is the layer the package was found in, when the SBOM records one.
+func firstLayer(p *sbomPackage.Package) string {
+	if len(p.Layers) == 0 {
+		return ""
+	}
+	return p.Layers[0]
+}
+
+// containerSchema names the image the package was found in, when the SBOM records it.
+func containerSchema(p *sbomPackage.Package) *schema.Container {
+	if p.Image == "" {
+		return nil
+	}
+	reference, err := image_reference.Parse(p.Image)
+	if err != nil || reference == nil {
+		return &schema.Container{Image: &schema.ContainerImage{Name: p.Image}}
+	}
+	return &schema.Container{Image: reference.ContainerImage()}
 }
 
 // fillInfo enriches detected findings with the vulnerability details from the database: severity, description,

@@ -19,4 +19,15 @@ type Package struct {
 	// Hat advisories are looked up by.
 	ContentSets []string
 	Nvr         string
+	// Scope is the CycloneDX scope of the component ("required", "optional", "excluded"): whether the package ships in
+	// the artifact or only took part in producing it (a build image's package, a development dependency).
+	Scope string
+	// Image is the container image the package was found in, when the SBOM records it: the SBOM's subject for
+	// runtime packages, a build image for those nested under a build-image component.
+	Image string
+	// Paths are where the package was found inside that image, when the SBOM records it.
+	Paths []string
+	// Layers are the diff IDs of the image layers the package was found in (the layers that last wrote the files it
+	// was read from), when the SBOM records them.
+	Layers []string
 }

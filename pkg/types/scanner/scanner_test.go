@@ -888,3 +888,54 @@ func TestNewMissingDb(t *testing.T) {
 		t.Errorf("expected no database file to be created, stat: %v", err)
 	}
 }
+
+//nolint:paralleltest // The trivy-db connection is a process-wide singleton, so database-backed tests run one at a time.
+func TestScannerScanCarriesScopeImageAndPath(t *testing.T) {
+	scanner := newTestScanner(t, fillTestDb(t))
+
+	findings, err := scanner.Scan([]byte(`{
+		"bomFormat": "CycloneDX", "specVersion": "1.6",
+		"metadata": {"component": {"type": "container", "name": "localhost/app", "version": "latest", "purl": "pkg:docker/localhost/app@latest",
+			"properties": [{"name": "altshift:sbom:image", "value": "localhost/app:latest"}]}},
+		"components": [
+			{"type": "library", "name": "lodash", "version": "4.17.20", "scope": "required", "purl": "pkg:npm/lodash@4.17.20",
+				"properties": [{"name": "altshift:sbom:image", "value": "localhost/app:latest"}, {"name": "altshift:sbom:path", "value": "/app/node_modules/lodash/package.json"}, {"name": "altshift:sbom:layer", "value": "sha256:applayer"}]},
+			{"type": "container", "name": "golang", "version": "1.26-alpine", "scope": "excluded", "purl": "pkg:docker/golang@1.26-alpine",
+				"properties": [{"name": "altshift:sbom:image", "value": "docker.io/library/golang:1.26-alpine"}],
+				"components": [
+					{"type": "library", "name": "busybox", "version": "1.36.1-r15", "scope": "excluded", "purl": "pkg:apk/alpine/busybox@1.36.1-r15?arch=x86_64&distro=alpine-3.18.4",
+						"properties": [{"name": "altshift:sbom:path", "value": "/lib/apk/db/installed"}]}
+				]}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	byId := make(map[string]*sbomScanningFinding.Finding)
+	for _, f := range findings {
+		byId[f.Vulnerability.Id+"|"+f.Package.Name] = f
+	}
+
+	lodash := byId["CVE-2021-23337|lodash"]
+	if lodash == nil {
+		t.Fatalf("expected the lodash finding, got %+v", findings)
+	}
+	if lodash.Package.InstallScope != "required" || lodash.Package.Path != "/app/node_modules/lodash/package.json" || lodash.Layer != "sha256:applayer" {
+		t.Errorf("unexpected lodash package: %+v (layer %q)", lodash.Package, lodash.Layer)
+	}
+	if lodash.Container == nil || lodash.Container.Image == nil || lodash.Container.Image.Name != "localhost/app" || lodash.Container.Image.Tag != "latest" {
+		t.Errorf("unexpected lodash container: %+v", lodash.Container)
+	}
+
+	busybox := byId["CVE-2023-42366|busybox"]
+	if busybox == nil {
+		t.Fatalf("expected the nested busybox finding, got %+v", findings)
+	}
+	if busybox.Package.InstallScope != "excluded" || busybox.Package.Path != "/lib/apk/db/installed" {
+		t.Errorf("unexpected busybox package: %+v", busybox.Package)
+	}
+	if busybox.Container == nil || busybox.Container.Image == nil || busybox.Container.Image.Name != "docker.io/library/golang" || busybox.Container.Image.Tag != "1.26-alpine" {
+		t.Errorf("unexpected busybox container: %+v", busybox.Container)
+	}
+}
