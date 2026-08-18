@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json/v2"
@@ -132,13 +133,17 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdinIsTerminal bo
 	if err != nil {
 		return exitError, err
 	}
-	if len(inputs) == 0 {
+	// Updating the database is a thing to ask for on its own.
+	if len(inputs) == 0 && !args.update {
 		fmt.Fprint(stderr, parser.FormatError(errNothingToScan))
 		return exitUsage, nil
 	}
 
 	if err := ensureDatabase(ctx, args, registry, now, stderr); err != nil {
 		return exitError, err
+	}
+	if len(inputs) == 0 {
+		return exitClean, nil
 	}
 
 	vulnerabilityScanner, err := sbomScanner.New(args.database)
@@ -203,6 +208,10 @@ func readInputs(ctx context.Context, args *arguments, stdin io.Reader, stdinIsTe
 		}
 		if err != nil {
 			return nil, altshiftErrors.NewWithTrace(fmt.Errorf("read %s: %w", name, err), name)
+		}
+		// Nothing on standard input is nothing to scan, not an empty SBOM.
+		if name == stdinName && len(bytes.TrimSpace(data)) == 0 {
+			continue
 		}
 		inputs = append(inputs, &input{name: name, data: data})
 	}

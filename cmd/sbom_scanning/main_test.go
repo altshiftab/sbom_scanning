@@ -102,12 +102,14 @@ func TestRunUsage(t *testing.T) {
 	testCases := []struct {
 		name         string
 		args         []string
+		stdin        string
 		expectedCode int
 		stderr       string
 	}{
 		{name: "help", args: []string{"--help"}, expectedCode: exitClean},
 		{name: "unknown option", args: []string{"--nope"}, expectedCode: exitUsage, stderr: "error"},
 		{name: "nothing to scan on a terminal", args: nil, expectedCode: exitUsage, stderr: "nothing to scan"},
+		{name: "empty piped input is nothing to scan", args: nil, stdin: "  \n", expectedCode: exitUsage, stderr: "nothing to scan"},
 		{name: "bad format choice", args: []string{"--format", "yaml", "x.json"}, expectedCode: exitUsage, stderr: "error"},
 	}
 
@@ -115,7 +117,7 @@ func TestRunUsage(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			code, _, stderr, err := runCommand(t, "", true, nil, testCase.args...)
+			code, _, stderr, err := runCommand(t, testCase.stdin, testCase.stdin == "", nil, testCase.args...)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -395,15 +397,22 @@ func TestRunUpdateAndStaleness(t *testing.T) {
 		t.Errorf("expected a staleness warning, got %d %v %q", code, err, stderr)
 	}
 
-	// --update replaces it with what the registry has.
+	// --update replaces it with what the registry has, and needs nothing to scan.
 	fresh := newTestDatabase(t)
 	registry := newTestRegistry(t, databaseArchive(t, fresh))
-	code, _, stderr, err = runCommand(t, lodashSbom, false, registry, "--database", database, "--update")
-	if err != nil || code != exitClean || !strings.Contains(stderr, "downloading") || strings.Contains(stderr, "days old") {
-		t.Errorf("expected an update without a staleness warning, got %d %v %q", code, err, stderr)
+	code, stdout, stderr, err := runCommand(t, "", true, registry, "--database", database, "--update")
+	if err != nil || code != exitClean || !strings.Contains(stderr, "downloading") || strings.Contains(stderr, "days old") || stdout != "" {
+		t.Errorf("expected an update on its own, got %d %v stdout %q stderr %q", code, err, stdout, stderr)
 	}
 	if databaseAge(database, time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC)) != time.Hour {
 		t.Errorf("expected the fresh metadata after the update")
+	}
+
+	// And with something to scan, it updates first and scans with the result.
+	registry = newTestRegistry(t, databaseArchive(t, fresh))
+	code, stdout, stderr, err = runCommand(t, lodashSbom, false, registry, "--database", database, "--update")
+	if err != nil || code != exitClean || !strings.Contains(stderr, "downloading") || !strings.Contains(stdout, "CVE-2021-23337") {
+		t.Errorf("expected an update followed by a scan, got %d %v stdout %q stderr %q", code, err, stdout, stderr)
 	}
 }
 
