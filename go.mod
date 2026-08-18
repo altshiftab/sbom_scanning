@@ -3,7 +3,7 @@ module github.com/altshiftab/sbom_scanning
 go 1.26
 
 require (
-	github.com/altshiftab/utils_go v1.29.0
+	github.com/altshiftab/utils_go v1.30.0
 	github.com/aquasecurity/go-gem-version v0.0.0-20201115065557-8eed6fe000ce
 	github.com/aquasecurity/go-npm-version v0.0.2
 	github.com/aquasecurity/go-pep440-version v0.0.1

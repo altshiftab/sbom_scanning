@@ -7,5 +7,6 @@
 !/pkg
 
 !/cmd/sbom_scanning
+!/cmd/**/*.go
 !/pkg/**/
 !/pkg/**/*.go
