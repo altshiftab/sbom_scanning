@@ -1,6 +1,6 @@
 module github.com/altshiftab/sbom_scanning
 
-go 1.26
+go 1.27
 
 require (
 	github.com/altshiftab/utils_go v1.30.0
