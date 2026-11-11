@@ -111,8 +111,10 @@ func autoDetectSeverity(vulnId string, vuln *dbTypes.Vulnerability, dataSourceId
 		}
 	}
 
-	if vuln.Severity != "" {
-		return vuln.Severity, ""
+	// Deprecated for schema v3, but schema v2 (the one read here) still fills it, and Trivy's auto source falls back
+	// to it the same way.
+	if vuln.Severity != "" { //nolint:staticcheck // SA1019: see above
+		return vuln.Severity, "" //nolint:staticcheck // SA1019: see above
 	}
 
 	return dbTypes.SeverityUnknown.String(), ""

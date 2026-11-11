@@ -135,7 +135,7 @@ func TestAutoDetectSeverity(t *testing.T) {
 		{
 			name:         "precomputed severity",
 			vulnId:       "CVE-2024-0001",
-			vuln:         dbTypes.Vulnerability{Severity: "MEDIUM"},
+			vuln:         dbTypes.Vulnerability{Severity: "MEDIUM"}, //nolint:staticcheck // SA1019: schema v2 still fills it
 			dataSourceId: vulnerability.NVD,
 			expected:     "MEDIUM",
 		},
@@ -339,7 +339,7 @@ func fillTestDb(t *testing.T) func(tx *bolt.Tx, dbc db.Config) error {
 		putVulnerability(t, tx, dbc, "CVE-2021-23337", dbTypes.Vulnerability{
 			Title:          "nodejs-lodash: command injection via template",
 			Description:    "Lodash versions prior to 4.17.21 are vulnerable to Command Injection via the template function.",
-			Severity:       "HIGH",
+			Severity:       "HIGH", //nolint:staticcheck // SA1019: schema v2 still fills it
 			CweIDs:         []string{"CWE-77"},
 			VendorSeverity: dbTypes.VendorSeverity{vulnerability.NVD: dbTypes.SeverityHigh, vulnerability.GHSA: dbTypes.SeverityHigh, vulnerability.RedHat: dbTypes.SeverityMedium},
 			CVSS: dbTypes.VendorCVSS{
