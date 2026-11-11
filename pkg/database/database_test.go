@@ -59,7 +59,13 @@ type registry struct {
 	manifestStatus int
 	// blobStatus, when set, is returned for the blob.
 	blobStatus int
-	archive    []byte
+	// stallBlob sends the first half of the blob and then nothing, until the client gives up.
+	stallBlob bool
+	// stallManifest never answers for the manifest, until the client gives up.
+	stallManifest bool
+	// trickle sends the blob in eight parts, this long apart.
+	trickle time.Duration
+	archive []byte
 }
 
 // newRegistry serves the database artifact under repository and returns the source naming it, and a counter of the
@@ -83,6 +89,10 @@ func newRegistry(t *testing.T, repository string, behaviour *registry) (*Source,
 			}
 			_, _ = w.Write([]byte(`{"token": "` + token + `"}`))
 		case "/v2/" + repository + "/manifests/" + Tag:
+			if behaviour.stallManifest {
+				<-r.Context().Done()
+				return
+			}
 			if behaviour.manifestStatus != 0 {
 				w.WriteHeader(behaviour.manifestStatus)
 				return
@@ -107,6 +117,25 @@ func newRegistry(t *testing.T, repository string, behaviour *registry) (*Source,
 				return
 			}
 			blobs.Add(1)
+			if behaviour.trickle != 0 {
+				part := len(behaviour.archive)/8 + 1
+				for offset := 0; offset < len(behaviour.archive); offset += part {
+					_, _ = w.Write(behaviour.archive[offset:min(offset+part, len(behaviour.archive))])
+					if flusher, ok := w.(http.Flusher); ok {
+						flusher.Flush()
+					}
+					time.Sleep(behaviour.trickle)
+				}
+				return
+			}
+			if behaviour.stallBlob {
+				_, _ = w.Write(behaviour.archive[:len(behaviour.archive)/2])
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+				return
+			}
 			_, _ = w.Write(behaviour.archive)
 		default:
 			http.NotFound(w, r)
@@ -364,6 +393,79 @@ func TestReadMetadata(t *testing.T) {
 			}
 			if !metadata.UpdatedAt.Equal(testCase.expected) {
 				t.Errorf("%s: expected %v, got %v", testCase.name, testCase.expected, metadata.UpdatedAt)
+			}
+		})
+	}
+}
+
+//nolint:paralleltest // It shortens the package's timeouts, which the parallel tests must not see; Go runs it before them.
+func TestDownloadGivesUpOnASilentSource(t *testing.T) {
+	saved := timeouts
+	timeouts.request, timeouts.stall = 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { timeouts = saved })
+
+	files := map[string]string{FileName: "the database", MetadataFileName: `{"UpdatedAt":"2026-11-11T13:00:47Z"}`}
+	// The blob must be big enough that half of it does not complete the tarball.
+	files[FileName] = strings.Repeat("database page ", 64*1024)
+	good := archive(t, files)
+
+	testCases := []struct {
+		name             string
+		first            *registry
+		expectedProgress string
+	}{
+		{name: "a blob that stops coming", first: &registry{stallBlob: true, archive: good}, expectedProgress: "stalled"},
+		{name: "a manifest that never comes", first: &registry{stallManifest: true, archive: good}, expectedProgress: "could not download"},
+		// Slower in all than the stall timeout, but never silent that long: it is kept.
+		{name: "a blob that comes slowly", first: &registry{trickle: 100 * time.Millisecond, archive: good}, expectedProgress: ""},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			first, _ := newRegistry(t, "first", testCase.first)
+			second, served := newRegistry(t, "trivy-db", &registry{archive: good})
+			dir := filepath.Join(t.TempDir(), "db")
+			var progress strings.Builder
+
+			start := time.Now()
+			err := Download(context.Background(), dir, []*Source{first, second}, &progress)
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", testCase.name, err)
+			}
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Errorf("%s: expected the silent source to be given up quickly, took %s", testCase.name, elapsed)
+			}
+			expectedServed := int32(1)
+			if testCase.expectedProgress == "" {
+				expectedServed = 0
+			}
+			if served.Load() != expectedServed || !strings.Contains(progress.String(), testCase.expectedProgress) {
+				t.Errorf("%s: expected the second source to serve %d times, got %d, progress %q", testCase.name, expectedServed, served.Load(), progress.String())
+			}
+			data, err := os.ReadFile(filepath.Join(dir, FileName)) //nolint:gosec // test fixture
+			if err != nil || string(data) != files[FileName] {
+				t.Errorf("%s: expected the whole database from the second source (%d bytes), got %d bytes %v", testCase.name, len(files[FileName]), len(data), err)
+			}
+		})
+	}
+}
+
+func TestSourceString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		source   *Source
+		expected string
+	}{
+		{name: "a source", source: DefaultSources()[0], expected: "ghcr.io/aquasecurity/trivy-db"},
+		{name: "no registry", source: &Source{Repository: "aquasec/trivy-db"}, expected: "aquasec/trivy-db"},
+		{name: "nil", source: nil, expected: ""},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if got := testCase.source.String(); got != testCase.expected {
+				t.Errorf("%s: expected %q, got %q", testCase.name, testCase.expected, got)
 			}
 		})
 	}

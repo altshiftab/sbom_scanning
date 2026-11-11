@@ -45,7 +45,16 @@ var (
 	ErrBlobStatus      = errors.New("unexpected status fetching the database blob")
 	ErrChallenge       = errors.New("unsupported registry authentication challenge")
 	ErrManifestStatus  = errors.New("unexpected status fetching the database manifest")
+	ErrStalled         = errors.New("database download stalled")
 )
+
+// timeouts bound the download. Each request but the blob's must be answered within request; the blob, over a hundred
+// megabytes, may take as long as it takes while it keeps coming, and is given up for the next source after stall
+// without a byte. A variable rather than constants, so the tests need not wait minutes.
+var timeouts = struct {
+	request time.Duration
+	stall   time.Duration
+}{request: 30 * time.Second, stall: time.Minute}
 
 // Source is a registry repository the database is published under.
 type Source struct {
@@ -54,7 +63,10 @@ type Source struct {
 }
 
 func (source *Source) String() string {
-	if source == nil || source.Registry == nil {
+	if source == nil {
+		return ""
+	}
+	if source.Registry == nil {
 		return source.Repository
 	}
 	return source.Registry.Host + "/" + source.Repository
@@ -135,11 +147,12 @@ func download(ctx context.Context, dir string, source *Source, progress io.Write
 		return altshiftErrors.NewWithTrace(empty_error.New("source repository"))
 	}
 
-	token, err := pullToken(ctx, source)
+	requestClient := &http.Client{Timeout: timeouts.request}
+	token, err := pullToken(ctx, source, requestClient)
 	if err != nil {
 		return fmt.Errorf("pull token: %w", err)
 	}
-	var options []fetch_config.Option
+	options := []fetch_config.Option{fetch_config.WithHttpClient(requestClient)}
 	if token != "" {
 		options = append(options, fetch_config.WithHeaders(map[string]string{"Authorization": "Bearer " + token}))
 	}
@@ -154,9 +167,22 @@ func download(ctx context.Context, dir string, source *Source, progress io.Write
 	}
 	layer := manifest.Layers[0]
 
+	// A watchdog cancels the blob's request when no byte has come for the stall timeout, the wait for the response
+	// included.
+	blobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	watchdog := time.AfterFunc(timeouts.stall, cancel)
+	defer watchdog.Stop()
+	stalled := func(err error) error {
+		if blobCtx.Err() != nil && ctx.Err() == nil {
+			return fmt.Errorf("%w: nothing for %s: %w", ErrStalled, timeouts.stall, err)
+		}
+		return err
+	}
+
 	blobUrl := *source.Registry
 	blobUrl.Path = "/v2/" + source.Repository + "/blobs/" + layer.Digest
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, blobUrl.String(), nil)
+	request, err := http.NewRequestWithContext(blobCtx, http.MethodGet, blobUrl.String(), nil)
 	if err != nil {
 		return altshiftErrors.NewWithTrace(fmt.Errorf("new request: %w", err), blobUrl.String())
 	}
@@ -167,7 +193,7 @@ func download(ctx context.Context, dir string, source *Source, progress io.Write
 	// into memory.
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return altshiftErrors.NewWithTrace(fmt.Errorf("get blob: %w", err), blobUrl.String())
+		return altshiftErrors.NewWithTrace(stalled(fmt.Errorf("get blob: %w", err)), blobUrl.String())
 	}
 	if response == nil {
 		return altshiftErrors.NewWithTrace(nil_error.New("response"), blobUrl.String())
@@ -181,13 +207,31 @@ func download(ctx context.Context, dir string, source *Source, progress io.Write
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return altshiftErrors.NewWithTrace(fmt.Errorf("mkdir all: %w", err), dir)
 	}
-	return extract(response.Body, dir)
+	if err := extract(&watchedReader{reader: response.Body, watchdog: watchdog, timeout: timeouts.stall}, dir); err != nil {
+		return stalled(err)
+	}
+	return nil
+}
+
+// watchedReader puts its watchdog back each time bytes come.
+type watchedReader struct {
+	reader   io.Reader
+	watchdog *time.Timer
+	timeout  time.Duration
+}
+
+func (r *watchedReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.watchdog.Reset(r.timeout)
+	}
+	return n, err //nolint:wrapcheck // a reader passes its source's errors on as they are, io.EOF above all
 }
 
 // pullToken asks for the database manifest without credentials. A registry that serves it anonymously needs no token
 // (mirror.gcr.io); one that answers with a Bearer challenge (ghcr.io) is asked for an anonymous token at the realm the
 // challenge names.
-func pullToken(ctx context.Context, source *Source) (string, error) {
+func pullToken(ctx context.Context, source *Source, client *http.Client) (string, error) {
 	manifestUrl := *source.Registry
 	manifestUrl.Path = "/v2/" + source.Repository + "/manifests/" + Tag
 	request, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestUrl.String(), nil)
@@ -195,7 +239,7 @@ func pullToken(ctx context.Context, source *Source) (string, error) {
 		return "", altshiftErrors.NewWithTrace(fmt.Errorf("new request: %w", err), manifestUrl.String())
 	}
 	request.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return "", altshiftErrors.NewWithTrace(fmt.Errorf("head manifest: %w", err), manifestUrl.String())
 	}
@@ -235,7 +279,7 @@ func pullToken(ctx context.Context, source *Source) (string, error) {
 	_, tokenResponse, err := altshiftHttpUtils.FetchJson[*struct {
 		Token       string `json:"token"`
 		AccessToken string `json:"access_token"`
-	}](ctx, tokenUrl.String()) //nolint:bodyclose // the body is consumed and closed by FetchJson
+	}](ctx, tokenUrl.String(), fetch_config.WithHttpClient(client)) //nolint:bodyclose // the body is consumed and closed by FetchJson
 	if err != nil {
 		return "", altshiftErrors.New(fmt.Errorf("fetch json (token): %w", err), tokenUrl.String())
 	}
