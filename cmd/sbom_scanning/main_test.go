@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/altshiftab/sbom_scanning/pkg/database"
 	sbomScanningFinding "github.com/altshiftab/sbom_scanning/pkg/types/finding"
 	"github.com/altshiftab/utils_go/pkg/schema"
 	"github.com/aquasecurity/trivy-db/pkg/db"
@@ -67,7 +68,7 @@ func newTestDatabase(t *testing.T) string {
 	if err := db.Close(); err != nil {
 		t.Fatalf("db close: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, metadataFileName), []byte(`{"Version":2,"UpdatedAt":"2026-08-18T12:00:00Z","NextUpdate":"2026-08-19T12:00:00Z"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, database.MetadataFileName), []byte(`{"Version":2,"UpdatedAt":"2026-08-18T12:00:00Z","NextUpdate":"2026-08-19T12:00:00Z"}`), 0o600); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
 	return dir
@@ -88,11 +89,11 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func runCommand(t *testing.T, stdin string, stdinIsTerminal bool, registry *url.URL, args ...string) (int, string, string, error) {
+func runCommand(t *testing.T, stdin string, stdinIsTerminal bool, sources []*database.Source, args ...string) (int, string, string, error) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	now := func() time.Time { return time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC) }
-	code, err := run(context.Background(), args, strings.NewReader(stdin), stdinIsTerminal, &stdout, &stderr, registry, now)
+	code, err := run(context.Background(), args, strings.NewReader(stdin), stdinIsTerminal, &stdout, &stderr, sources, now)
 	return code, stdout.String(), stderr.String(), err
 }
 
@@ -297,7 +298,7 @@ func databaseArchive(t *testing.T, dir string) []byte {
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
 	tarWriter := tar.NewWriter(gzipWriter)
-	for _, name := range []string{databaseFileName, metadataFileName} {
+	for _, name := range []string{database.FileName, database.MetadataFileName} {
 		data, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // test fixture
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -314,11 +315,14 @@ func databaseArchive(t *testing.T, dir string) []byte {
 	return buffer.Bytes()
 }
 
-// newTestRegistry serves the database artifact the way ghcr.io does: an anonymous token, an OCI manifest, a blob.
-func newTestRegistry(t *testing.T, archive []byte) *url.URL {
+// newTestRegistry serves the database artifact the way ghcr.io does: a Bearer challenge, an anonymous token, an OCI
+// manifest, a blob.
+func newTestRegistry(t *testing.T, archive []byte) []*database.Source {
 	t.Helper()
 	const digest = "sha256:0123456789abcdef"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorized := r.Header.Get("Authorization") == "Bearer anonymous-token"
 		switch r.URL.Path {
 		case "/token":
 			if r.URL.Query().Get("scope") != "repository:aquasecurity/trivy-db:pull" {
@@ -327,14 +331,18 @@ func newTestRegistry(t *testing.T, archive []byte) *url.URL {
 			}
 			_, _ = w.Write([]byte(`{"token": "anonymous-token"}`))
 		case "/v2/aquasecurity/trivy-db/manifests/2":
-			if r.Header.Get("Authorization") != "Bearer anonymous-token" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			if !authorized {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/token",service="ghcr.io",scope="repository:aquasecurity/trivy-db:pull"`)
+				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			if r.Method == http.MethodHead {
+				return
+			}
 			_, _ = w.Write([]byte(`{"schemaVersion": 2, "layers": [{"mediaType": "application/vnd.aquasec.trivy.db.layer.v1.tar+gzip", "digest": "` + digest + `", "size": ` + itoa(len(archive)) + `}]}`))
 		case "/v2/aquasecurity/trivy-db/blobs/" + digest:
-			if r.Header.Get("Authorization") != "Bearer anonymous-token" {
+			if !authorized {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -348,7 +356,7 @@ func newTestRegistry(t *testing.T, archive []byte) *url.URL {
 	if err != nil {
 		t.Fatalf("parse url: %v", err)
 	}
-	return registry
+	return []*database.Source{{Registry: registry, Repository: "aquasecurity/trivy-db"}}
 }
 
 func itoa(n int) string {
@@ -372,7 +380,7 @@ func TestRunDownloadsMissingDatabase(t *testing.T) {
 	if !strings.Contains(stdout, "CVE-2021-23337") {
 		t.Errorf("expected findings from the downloaded database, got:\n%s", stdout)
 	}
-	for _, name := range []string{databaseFileName, metadataFileName} {
+	for _, name := range []string{database.FileName, database.MetadataFileName} {
 		if _, err := os.Stat(filepath.Join(target, name)); err != nil {
 			t.Errorf("expected %s in the target: %v", name, err)
 		}
@@ -386,13 +394,13 @@ func TestRunDownloadsMissingDatabase(t *testing.T) {
 
 //nolint:paralleltest // The trivy-db connection is a process-wide singleton, so database-backed tests run one at a time.
 func TestRunUpdateAndStaleness(t *testing.T) {
-	database := newTestDatabase(t)
+	databaseDir := newTestDatabase(t)
 
 	// A stale database is pointed out.
-	if err := os.WriteFile(filepath.Join(database, metadataFileName), []byte(`{"Version":2,"UpdatedAt":"2026-08-01T12:00:00Z"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(databaseDir, database.MetadataFileName), []byte(`{"Version":2,"UpdatedAt":"2026-08-01T12:00:00Z"}`), 0o600); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
-	code, _, stderr, err := runCommand(t, lodashSbom, false, nil, "--database", database)
+	code, _, stderr, err := runCommand(t, lodashSbom, false, nil, "--database", databaseDir)
 	if err != nil || code != exitClean || !strings.Contains(stderr, "17 days old") {
 		t.Errorf("expected a staleness warning, got %d %v %q", code, err, stderr)
 	}
@@ -400,17 +408,17 @@ func TestRunUpdateAndStaleness(t *testing.T) {
 	// --update replaces it with what the registry has, and needs nothing to scan.
 	fresh := newTestDatabase(t)
 	registry := newTestRegistry(t, databaseArchive(t, fresh))
-	code, stdout, stderr, err := runCommand(t, "", true, registry, "--database", database, "--update")
+	code, stdout, stderr, err := runCommand(t, "", true, registry, "--database", databaseDir, "--update")
 	if err != nil || code != exitClean || !strings.Contains(stderr, "downloading") || strings.Contains(stderr, "days old") || stdout != "" {
 		t.Errorf("expected an update on its own, got %d %v stdout %q stderr %q", code, err, stdout, stderr)
 	}
-	if databaseAge(database, time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC)) != time.Hour {
+	if databaseAge(databaseDir, time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC)) != time.Hour {
 		t.Errorf("expected the fresh metadata after the update")
 	}
 
 	// And with something to scan, it updates first and scans with the result.
 	registry = newTestRegistry(t, databaseArchive(t, fresh))
-	code, stdout, stderr, err = runCommand(t, lodashSbom, false, registry, "--database", database, "--update")
+	code, stdout, stderr, err = runCommand(t, lodashSbom, false, registry, "--database", databaseDir, "--update")
 	if err != nil || code != exitClean || !strings.Contains(stderr, "downloading") || !strings.Contains(stdout, "CVE-2021-23337") {
 		t.Errorf("expected an update followed by a scan, got %d %v stdout %q stderr %q", code, err, stdout, stderr)
 	}

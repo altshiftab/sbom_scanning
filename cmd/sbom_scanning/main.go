@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/altshiftab/sbom_scanning/pkg/database"
 	sbomScanningFinding "github.com/altshiftab/sbom_scanning/pkg/types/finding"
 	sbomScanner "github.com/altshiftab/sbom_scanning/pkg/types/scanner"
 	argumentParser "github.com/altshiftab/utils_go/pkg/cli/argument_parser"
@@ -115,7 +115,7 @@ type report struct {
 }
 
 // run does what the command line asks and returns the exit status and, for a failure, the error to report.
-func run(ctx context.Context, argv []string, stdin io.Reader, stdinIsTerminal bool, stdout, stderr io.Writer, registry *url.URL, now func() time.Time) (int, error) {
+func run(ctx context.Context, argv []string, stdin io.Reader, stdinIsTerminal bool, stdout, stderr io.Writer, sources []*database.Source, now func() time.Time) (int, error) {
 	args := &arguments{}
 	parser := newParser(args, stdout)
 	if err := parser.Validate(); err != nil {
@@ -139,7 +139,7 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdinIsTerminal bo
 		return exitUsage, nil
 	}
 
-	if err := ensureDatabase(ctx, args, registry, now, stderr); err != nil {
+	if err := ensureDatabase(ctx, args, sources, now, stderr); err != nil {
 		return exitError, err
 	}
 	if len(inputs) == 0 {
@@ -240,8 +240,8 @@ func readInputs(ctx context.Context, args *arguments, stdin io.Reader, stdinIsTe
 
 // ensureDatabase makes sure a database is there to scan with: it downloads one when asked or when none exists, and
 // points out one that has grown old.
-func ensureDatabase(ctx context.Context, args *arguments, registry *url.URL, now func() time.Time, stderr io.Writer) error {
-	_, statErr := os.Stat(filepath.Join(args.database, databaseFileName))
+func ensureDatabase(ctx context.Context, args *arguments, sources []*database.Source, now func() time.Time, stderr io.Writer) error {
+	_, statErr := os.Stat(filepath.Join(args.database, database.FileName))
 	missing := errors.Is(statErr, os.ErrNotExist)
 	if statErr != nil && !missing {
 		return altshiftErrors.NewWithTrace(fmt.Errorf("stat database: %w", statErr), args.database)
@@ -251,7 +251,7 @@ func ensureDatabase(ctx context.Context, args *arguments, registry *url.URL, now
 		if missing && !args.update {
 			fmt.Fprintf(stderr, "sbom_scanning: no database in %s\n", args.database)
 		}
-		if err := downloadDatabase(ctx, registry, args.database, stderr); err != nil {
+		if err := database.Download(ctx, args.database, sources, stderr); err != nil {
 			return fmt.Errorf("download database: %w", err)
 		}
 		return nil
@@ -358,16 +358,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	registry, err := url.Parse(trivyDatabaseRegistry)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sbom_scanning: error: %v\n", err)
-		os.Exit(exitError)
-	}
-
 	stdinInfo, statErr := os.Stdin.Stat()
 	stdinIsTerminal := statErr == nil && stdinInfo.Mode()&os.ModeCharDevice != 0
 
-	code, err := run(ctx, os.Args[1:], os.Stdin, stdinIsTerminal, os.Stdout, os.Stderr, registry, time.Now)
+	code, err := run(ctx, os.Args[1:], os.Stdin, stdinIsTerminal, os.Stdout, os.Stderr, database.DefaultSources(), time.Now)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sbom_scanning: error: %v\n", err)
 	}
