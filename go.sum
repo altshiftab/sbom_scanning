@@ -1,8 +1,8 @@
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=
 github.com/VividCortex/ewma v1.2.0/go.mod h1:nz4BbCtbLyFDeC9SUHbtcT5644juEuWfUAUnGx7j5l4=
-github.com/altshiftab/utils_go v1.112.0 h1:vSR7B7CiwenKOXcc4k5mISQx/Xr+yPwVOJanGT9yPpI=
-github.com/altshiftab/utils_go v1.112.0/go.mod h1:lNBqVAWMIhIISNz0pOQnsqRsCPg6S50Q62GH6slGBOk=
+github.com/altshiftab/utils_go v1.131.1 h1:uUu1DVozArMLExmQLaLTOnCQ2nJagexOkQhWd7HMlcE=
+github.com/altshiftab/utils_go v1.131.1/go.mod h1:lNBqVAWMIhIISNz0pOQnsqRsCPg6S50Q62GH6slGBOk=
 github.com/aquasecurity/bolt-fixtures v0.0.0-20200903104109-d34e7f983986 h1:2a30xLN2sUZcMXl50hg+PJCIDdJgIvIbVcKqLJ/ZrtM=
 github.com/aquasecurity/bolt-fixtures v0.0.0-20200903104109-d34e7f983986/go.mod h1:NT+jyeCzXk6vXR5MTkdn4z64TgGfE5HMLC8qfj5unl8=
 github.com/aquasecurity/go-gem-version v0.0.0-20201115065557-8eed6fe000ce h1:QgBRgJvtEOBtUXilDb1MLi1p1MWoyFDXAu5DEUl5nwM=
